@@ -180,6 +180,10 @@ class IPBEntry(OrderedObjectDict):
   def to_json(self):
     clean_dict = OrderedDict( tuple((key, value) for key, value in self.__dict__.items() if key not in ("eref",)) )
     return clean_dict
+  def vcard(self):
+    return 'BEGIN:VCARD\nVERSION:3.0\nN:{name}\n' \
+         'FN:{name}\nTEL;type=HOME:{phone}\n' \
+         'END:VCARD\n'.format(name=self.name, phone=self.phone)
 
 merged_ipb_entries = [] # will be populated with IPBEntry objects
 
@@ -324,7 +328,7 @@ def parse_file_entries(ib_file):
     #print(f"OL: {ipb_entry=} {identical_ipb_entry_found=} {len(merged_ipb_entries)=} {merged_ipb_entries=}")
 
 
-def process(infile, outfile):
+def old_process(infile, outfile):
   header = infile.read(0x244) # 0x244 = 580 bytes header; .read changes file cursor position
   entries = 0
   while True:
@@ -348,7 +352,7 @@ def main():
   parser = argparse.ArgumentParser( formatter_class=RawDescriptionHelpFormatter,
     description=HELP_TEXT)
   parser.add_argument('infiles', type=argparse.FileType('rb'),
-            help='Phonebook .ib files to read', nargs='+')
+            help='Phonebook .ib files to read', nargs='*')
   parser.add_argument('-o', '--outfile', type=argparse.FileType('w', encoding='utf8'),
             help='VCF File to write')
   parser.add_argument('-x', '--hexdump', action='store_true',
@@ -362,6 +366,8 @@ def main():
   parser.add_argument('-i', '--injson', type=argparse.FileType('r', encoding='utf8'),
             help='Do not parse .ib infiles; instead read injson file, and use it to reconstruct intermediate contacts collection')
   args = parser.parse_args()
+
+  #process(args.infile, args.outfile) # not anymore, is now old_process
 
   if (args.injson):
     # we have --injson - reconstruct intermediate contacts collection: merged_ipb_entries
@@ -486,14 +492,21 @@ def main():
   print("                   Found total duplicate name entries: {}; duplicate phone entries: {}".format(
     num_duplicate_names, num_duplicate_phones
   ))
-#process(args.infile, args.outfile)
 
-  if args.outjson:
+  if args.outjson or args.outfile:
     # sort entries alphabetically by name, case insensitive
     merged_ipb_entries.sort(key=lambda x: x.name.lower(), reverse=False)
+
+  if args.outjson:
     json.dump(merged_ipb_entries, args.outjson, ensure_ascii=False, indent=2)
     print("")
-    print("Wrote {} JSON entries to {}".format(len(merged_ipb_entries), args.outjson.name))
+    print("Wrote {} JSON entries to {}".format(len(merged_ipb_entries), os.path.abspath(args.outjson.name)))
+
+  if args.outfile:
+    for ipbe in merged_ipb_entries:
+      args.outfile.write( ipbe.vcard() )
+    print("")
+    print("Wrote {} VCF entries to {}".format(len(merged_ipb_entries), os.path.abspath(args.outfile.name)))
 
 
 if __name__ == '__main__':
