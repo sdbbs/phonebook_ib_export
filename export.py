@@ -18,6 +18,8 @@ import argparse
 import struct
 import binascii
 from collections import Counter
+from collections import OrderedDict
+import json
 
 phone_entry_headings_questionmark = {
   "Nokia 3310 3G": bytes([0x98, 0x03]), # also [0x94, 0x03]?
@@ -100,6 +102,49 @@ class IbFileData(object):
     self.entries_parse_log = None
 
 ib_files = [] # will be populated with IbFileData objects
+
+# https://stackoverflow.com/q/78068090
+from json import JSONEncoder
+def _default(self, obj):
+  return getattr(obj.__class__, "to_json", _default.default)(obj)
+_default.default = JSONEncoder().default
+JSONEncoder.default = _default
+class OrderedObjectDict(object):
+  __dict__ = OrderedDict()
+  def __setattr__(self, name, value):
+    self.__dict__[name] = value
+  def __getattr__(self, name):
+    return self.__dict__[name]
+  def __getitem__(self, name):
+    return self.__dict__[name]
+  def __setitem__(self, name, value):
+    self.__dict__[name] = value
+  def keys(self):
+    return self.__dict__.keys()
+  def to_json(self):
+    return self.__dict__ # or how you want it to be serialized
+
+# Intermediate Phone Book Entry
+class IPBEntry(OrderedObjectDict):
+  def __init__(self, name=None, phone=None):
+    self.name = ""
+    if name is not None:
+      self.name = name
+    self.phone = ""
+    if phone is not None:
+      self.phone = phone
+    self.iduplicates = 0 # intended to track only identical duplicates
+  def has_same_content(self, in_ipb_entry):
+    if ( (self.name == in_ipb_entry.name) and (self.phone == in_ipb_entry.phone) ):
+      return True
+    else:
+      return False
+  def __str__(self):
+    return "<IPBEntry name='{}' phone='{}' iduplicates={}>".format(self.name, self.phone, self.iduplicates)
+  def __repr__(self):
+    return "<IPBEntry name='{}' phone='{}' iduplicates={}>".format(self.name, self.phone, self.iduplicates)
+
+merged_ipb_entries = [] # will be populated with IPBEntry objects
 
 
 class hexdump:
@@ -224,6 +269,15 @@ def parse_file_entries(ib_file):
       continue
     eplog.append("-- entry {}, {} bytes: name: '{}' phone: '{}'".format(n_ibe, len(b_entry_data), entry.name, entry.phone))
     ibf.entries.append(entry)
+    ipb_entry = IPBEntry(name=entry.name, phone=entry.phone)
+    identical_ipb_entry_found = False
+    for tpb_entry in merged_ipb_entries:
+      if tpb_entry.has_same_content(ipb_entry):
+        identical_ipb_entry_found = True
+        tpb_entry.iduplicates += 1
+        break
+    if not(identical_ipb_entry_found):
+      merged_ipb_entries.append(ipb_entry)
 
 
 def process(infile, outfile):
@@ -259,6 +313,7 @@ def main():
   parser.add_argument('-e', '--print-log-entries', action='store_true',
             help='print log entries parsing results to stdout (can be lots of lines)')
   args = parser.parse_args()
+
   # perform analysis regardless
   for infile in args.infiles:
     analyze_file(infile)
@@ -316,6 +371,8 @@ def main():
     #
     print("")
     print("Files processed: {:3d}".format(len_ib_files))
+    print("Extracted entries: {:5d}".format(len(merged_ipb_entries)))
+    print(merged_ipb_entries)
   #process(args.infile, args.outfile)
 
 if __name__ == '__main__':
