@@ -27,6 +27,8 @@ HELP_TEXT = """Nokia 3310 phonebook.ib exporter. (should also handle Nokia 220 4
 
 By default, loop through the input files, parse entries and extract unique contacts in intermediary format, and print report: path, file size and number of parsed entries and entry parse errors (can also use --hexdump,  --print-analysis and --print-log-entries in this case).
 
+If --injson is specified, skip parsing of .ib infiles, and instead reconstruct intermediary format/intermediate contacts collection from the given .json file.
+
 If --outjson is specified, dump the contacts intermediary format as .json file.
 
 If --outfile is specified, write the contacts intermediary format as .vcf file.
@@ -180,10 +182,13 @@ class IPBEntry(OrderedObjectDict):
   def to_json(self):
     clean_dict = OrderedDict( tuple((key, value) for key, value in self.__dict__.items() if key not in ("eref",)) )
     return clean_dict
+  # make the vcard match the format for Nokia 215 4G
   def vcard(self):
-    return 'BEGIN:VCARD\nVERSION:3.0\nN:{name}\n' \
-         'FN:{name}\nTEL;type=HOME:{phone}\n' \
-         'END:VCARD\n'.format(name=self.name, phone=self.phone)
+    return 'BEGIN:VCARD\r\nVERSION:2.1\r\n' \
+         'N;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:;{name};;;\r\n' \
+         'FN;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:{name}\r\n' \
+         'TEL;HOME:{phone}\r\n' \
+         'END:VCARD\r\n'.format(name=self.name, phone=self.phone)
 
 merged_ipb_entries = [] # will be populated with IPBEntry objects
 
@@ -447,7 +452,7 @@ def main():
   if len(ipbentries_with_empties):
     print("")
     for ipbee in ipbentries_with_empties:
-      print("Removing entry with empty fields: {}".format(ipbe))
+      print("Removing entry with empty fields: {}".format(ipbee))
       merged_ipb_entries.remove(ipbee)
   # warn of duplicate names or phones
   uniq_names = {}
