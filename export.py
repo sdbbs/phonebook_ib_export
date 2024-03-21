@@ -143,13 +143,16 @@ class OrderedObjectDict(metaclass=OrderedClassMembers): #(object): # https://sta
 
 # Intermediate Phone Book Entry
 class IPBEntry(OrderedObjectDict):
-  def __init__(self, name=None, phone=None):
+  def __init__(self, name=None, phone=None, eref=None):
     self.name = ""
     if name is not None:
       self.name = name
     self.phone = ""
     if phone is not None:
       self.phone = phone
+    self.eref = None
+    if eref is not None:
+      self.eref = eref
     self.iduplicates = 0 # intended to track only identical duplicates
   #def setdata(self, name, phone):
   #  self.name = name
@@ -165,6 +168,9 @@ class IPBEntry(OrderedObjectDict):
     return "<IPBEntry name='{}' phone='{}' iduplicates={}>".format(self.name, self.phone, self.iduplicates)
   def __repr__(self):
     return "<IPBEntry name='{}' phone='{}' iduplicates={}>".format(self.name, self.phone, self.iduplicates)
+  def to_json(self):
+    clean_dict = OrderedDict( tuple((key, value) for key, value in self.__dict__.items() if key not in ("eref",)) )
+    return clean_dict
 
 merged_ipb_entries = [] # will be populated with IPBEntry objects
 
@@ -292,7 +298,7 @@ def parse_file_entries(ib_file):
     eplog.append("-- entry {}, {} bytes: name: '{}' phone: '{}'".format(n_ibe, len(b_entry_data), entry.name, entry.phone))
     ibf.entries.append(entry)
     #ipb_entry = IPBEntry().setdata(entry.name, entry.phone)
-    ipb_entry = IPBEntry(entry.name, entry.phone)
+    ipb_entry = IPBEntry(entry.name, entry.phone, entry)
     identical_ipb_entry_found = False
     #print(f"{merged_ipb_entries=}")
     for tpb_entry in merged_ipb_entries:
@@ -399,13 +405,58 @@ def main():
   #
   print("")
   print("Files processed: {:3d}".format(len_ib_files))
+  # clean up/remove items with empty name/phone fields
+  ipbentries_with_empties = []
+  for ipbe in merged_ipb_entries:
+    if not(ipbe.name) or not(ipbe.phone):
+      ipbentries_with_empties.append(ipbe)
+  if len(ipbentries_with_empties):
+    print("")
+    for ipbee in ipbentries_with_empties:
+      print("Removing entry with empty fields: {}".format(ipbe))
+      merged_ipb_entries.remove(ipbee)
+  # warn of duplicate names or phones
+  uniq_names = {}
+  num_duplicate_names = 0
+  for ipbe in merged_ipb_entries:
+    if ipbe.name not in uniq_names.keys():
+      uniq_names[ipbe.name] = [ipbe]
+    else:
+      uniq_names[ipbe.name] += [ipbe]
+  if len(uniq_names.keys()):
+    print("")
+    for tuname in uniq_names.keys():
+      if len(uniq_names[tuname]) > 1:
+        print("WARNING: Duplicate name '{}': {}".format(tuname, uniq_names[tuname]))
+        num_duplicate_names += 1
+  uniq_phones = {}
+  num_duplicate_phones = 0
+  for ipbe in merged_ipb_entries:
+    if ipbe.phone not in uniq_phones.keys():
+      uniq_phones[ipbe.phone] = [ipbe]
+    else:
+      uniq_phones[ipbe.phone] += [ipbe]
+  if len(uniq_phones.keys()):
+    print("")
+    for tuphone in uniq_phones.keys():
+      if len(uniq_phones[tuphone]) > 1:
+        print("WARNING: Duplicate phone '{}': {}".format(tuphone, uniq_phones[tuphone]))
+        num_duplicate_phones += 1
   all_duplicate_counts = [ipbe.iduplicates for ipbe in merged_ipb_entries]
   #unique_duplicate_counts = list(dict.fromkeys(all_duplicate_counts)) # without counts
   unique_duplicate_counts = dict(Counter(all_duplicate_counts).items())
-  print("Extracted entries: {:5d} (found duplicate counts: {})".format(len(merged_ipb_entries), unique_duplicate_counts))
+  print("")
+  print("Extracted entries: {:5d} (removed empty field entries: {}; found duplicate counts: {})".format(
+    len(merged_ipb_entries), len(ipbentries_with_empties), unique_duplicate_counts
+  ))
+  print("                   Found total duplicate name entries: {}; duplicate phone entries: {}".format(
+    num_duplicate_names, num_duplicate_phones
+  ))
 #process(args.infile, args.outfile)
 
   if args.outjson:
+    # sort entries alphabetically by name, case insensitive
+    merged_ipb_entries.sort(key=lambda x: x.name.lower(), reverse=False)
     json.dump(merged_ipb_entries, args.outjson, ensure_ascii=False, indent=2)
     print("")
     print("Wrote {} JSON entries to {}".format(len(merged_ipb_entries), args.outjson.name))
