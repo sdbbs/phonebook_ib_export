@@ -22,8 +22,8 @@ from collections import Counter
 class Entry(object):
   def __init__(self, data):
     self.hdr = struct.unpack_from('BB', data, 0x0)
-    if self.hdr != (0x94, 0x03):
-      raise ValueError('Invalid entry')
+    #if self.hdr != (0x94, 0x03):
+    #  raise ValueError('Invalid entry')
 
     # Name length
     name_len = struct.unpack_from('B', data, 0x16c)[0]
@@ -69,6 +69,7 @@ class IbFileData(object):
   def __init__(self):
     self.file = None
     self.header = None
+    self.contents = None
     self.hdr_num_entries = None
     self.entry_heading = None
     self.offsets = None
@@ -76,6 +77,8 @@ class IbFileData(object):
     self.unique_rel_offsets = None
     self.entry_size = None
     self.analysis_str = None
+    self.b_entries = None
+    self.entries = None
 
 ib_files = [] # will be populated with IbFileData objects
 
@@ -126,6 +129,7 @@ def analyze_file(infile):
   # two bytes at offset 0x30 (in header) should give number of entries as uint16_t LE
   hdr_num_entries = struct.unpack_from("<H", header, 0x30)[0]
   # read entire file in RAM, then search for entry headings, record relative offsets
+  b_entries = []
   offsets = []
   offset = 0
   infile.seek(offset)
@@ -139,6 +143,12 @@ def analyze_file(infile):
       offsets.append(offset)
       offset += eh_len
   #print(offsets)
+  for ioff, offset in enumerate(offsets):
+    if ioff == len(offsets)-1:
+      break
+    next_offset = offsets[ioff+1]
+    this_entry_slice = file_bstr[offset:next_offset]
+    b_entries.append(this_entry_slice)
   rel_offsets = tuple((x - y) for (x, y) in zip(offsets[1:], offsets[:-1]))
   #unique_rel_offsets = list(dict.fromkeys(rel_offsets)) # without counts
   unique_rel_offsets = dict(Counter(rel_offsets).items())
@@ -157,6 +167,7 @@ def analyze_file(infile):
   ibfile_data = IbFileData()
   ibfile_data.file = infile
   ibfile_data.header = header
+  ibfile_data.contents = file_bstr
   ibfile_data.hdr_num_entries = hdr_num_entries
   ibfile_data.entry_heading = entry_heading
   ibfile_data.offsets = offsets
@@ -164,7 +175,21 @@ def analyze_file(infile):
   ibfile_data.unique_rel_offsets = unique_rel_offsets
   ibfile_data.entry_size = entry_size
   ibfile_data.analysis_str = analysis_str
+  ibfile_data.b_entries = b_entries
+  ibfile_data.entries = []
   ib_files.append(ibfile_data)
+
+def parse_file_entries(ib_file):
+  ibf = ib_file
+  ibf.entries = []
+  for ibe, b_entry_data in enumerate(ibf.b_entries):
+    n_ibe = ibe + 1
+    try:
+      entry = Entry(b_entry_data)
+    except Exception as e:
+      print("-- cannot parse entry {} with {} bytes; ignoring".format(n_ibe, len(b_entry_data)))
+      continue
+    print("-- entry {}, {} bytes: name: '{}' phone: '{}'".format(n_ibe, len(b_entry_data), entry.name, entry.phone))
 
 
 def process(infile, outfile):
@@ -218,6 +243,8 @@ def main():
       # seemingly, if there are no differing rel_offsets, then header == counted+1
       # (unless header == counted == 1); else header == sum(counted)
       print("Number of entries comparison:")
+      all_entry_sizes = []
+      all_entry_headings = []
       for ib_file in ib_files:
         counts_list = tuple(ib_file.unique_rel_offsets.values())
         counts_list_str = "+".join(map(str, counts_list))
@@ -227,6 +254,20 @@ def main():
         print("  Header: {} <-> counted: {}".format(
           ib_file.hdr_num_entries, counts_list_str
         ))
+        all_entry_sizes.append(ib_file.entry_size)
+        all_entry_headings.append(ib_file.entry_heading)
+      uniq_entry_sizes = list(set(all_entry_sizes))
+      uniq_entry_headings = list(set(all_entry_headings))
+      uniq_entry_headings_str = ["0x{:02X} 0x{:02X}".format(eh[0], eh[1]) for eh in uniq_entry_headings]
+      print("Unique entry sizes ({}): {}".format(
+        len(uniq_entry_sizes), ", ".join(map(str, uniq_entry_sizes))
+      ))
+      print("Unique entry headings ({}): {}".format(
+        len(uniq_entry_headings), " ; ".join(uniq_entry_headings_str)
+      ))
+    #
+    for ib_file in ib_files:
+      parse_file_entries(ib_file)
   #process(args.infile, args.outfile)
 
 if __name__ == '__main__':
