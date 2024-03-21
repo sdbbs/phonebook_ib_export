@@ -68,6 +68,7 @@ class Entry(object):
 class IbFileData(object):
   def __init__(self):
     self.file = None
+    self.file_size = None
     self.header = None
     self.contents = None
     self.hdr_num_entries = None
@@ -121,6 +122,7 @@ def dump_header(infile):
   print("nextfour: {}".format(next_four_hex_str))
 
 def analyze_file(infile):
+  file_size = os.fstat(infile.fileno()).st_size
   infile.seek(0)
   header = infile.read(0x244) # 0x244 = 580 bytes header; .read changes file cursor position
   next_four = infile.read(4)
@@ -143,12 +145,17 @@ def analyze_file(infile):
       offsets.append(offset)
       offset += eh_len
   #print(offsets)
+  last_offset_idx = len(offsets)-1
   for ioff, offset in enumerate(offsets):
-    if ioff == len(offsets)-1:
+    if ioff == last_offset_idx:
       break
     next_offset = offsets[ioff+1]
     this_entry_slice = file_bstr[offset:next_offset]
     b_entries.append(this_entry_slice)
+  last_offset = offsets[last_offset_idx]
+  last_bytes_delta = file_size - last_offset # is almost never close to 1, assume it's a chunk
+  if last_bytes_delta > 1:
+    b_entries.append(file_bstr[last_offset:file_size-1])
   rel_offsets = tuple((x - y) for (x, y) in zip(offsets[1:], offsets[:-1]))
   #unique_rel_offsets = list(dict.fromkeys(rel_offsets)) # without counts
   unique_rel_offsets = dict(Counter(rel_offsets).items())
@@ -163,9 +170,11 @@ def analyze_file(infile):
   )
   analysis_str.append( eh_report )
   analysis_str.append( "Chosen assumed entry size is: {0:} (0x{0:04X})".format(entry_size) )
+  analysis_str.append( "Last offset is {:7d} for file size {:7d}".format(last_offset, file_size) )
   #
   ibfile_data = IbFileData()
   ibfile_data.file = infile
+  ibfile_data.file_size = file_size
   ibfile_data.header = header
   ibfile_data.contents = file_bstr
   ibfile_data.hdr_num_entries = hdr_num_entries
@@ -179,7 +188,7 @@ def analyze_file(infile):
   ibfile_data.entries = []
   ib_files.append(ibfile_data)
 
-def parse_file_entries(ib_file):
+def parse_file_entries(ib_file, do_log=True):
   ibf = ib_file
   ibf.entries = []
   for ibe, b_entry_data in enumerate(ibf.b_entries):
@@ -187,9 +196,12 @@ def parse_file_entries(ib_file):
     try:
       entry = Entry(b_entry_data)
     except Exception as e:
-      print("-- cannot parse entry {} with {} bytes; ignoring".format(n_ibe, len(b_entry_data)))
+      if (do_log):
+        print("-- cannot parse entry {} with {} bytes; ignoring".format(n_ibe, len(b_entry_data)))
       continue
-    print("-- entry {}, {} bytes: name: '{}' phone: '{}'".format(n_ibe, len(b_entry_data), entry.name, entry.phone))
+    if (do_log):
+      print("-- entry {}, {} bytes: name: '{}' phone: '{}'".format(n_ibe, len(b_entry_data), entry.name, entry.phone))
+    ibf.entries.append(entry)
 
 
 def process(infile, outfile):
@@ -213,15 +225,17 @@ def process(infile, outfile):
 
 def main():
   parser = argparse.ArgumentParser(
-    description='Nokia 3310 phonebook.ib exporter. If no --outfile is specified, loop through the input files and print path and file size (can also use --hexdump and --print-analysis in this case).')
+    description='Nokia 3310 phonebook.ib exporter. If no --outfile is specified, loop through the input files and print path and file size (can also use --hexdump,  --print-analysis and --print-log-entries in this case).')
   parser.add_argument('infiles', type=argparse.FileType('rb'),
-            help='Phonebook ,ib files to read', nargs='+')
+            help='Phonebook .ib files to read', nargs='+')
   parser.add_argument('-o', '--outfile', type=argparse.FileType('w', encoding='utf8'),
             help='VCF File to write')
   parser.add_argument('-x', '--hexdump', action='store_true',
-            help='print hexdump of the header to stdout')
+            help='print hexdump of an .ib file header to stdout')
   parser.add_argument('-a', '--print-analysis', action='store_true',
             help='print analysis results to stdout')
+  parser.add_argument('-e', '--print-log-entries', action='store_true',
+            help='print log entries parsing results to stdout (can be lots of lines)')
   args = parser.parse_args()
   # perform analysis regardless
   for infile in args.infiles:
@@ -231,8 +245,7 @@ def main():
     for ib_file in ib_files:
       infile = ib_file.file
       print(os.path.abspath(infile.name))
-      file_size = os.fstat(infile.fileno()).st_size
-      print("  File size: {0} (0x{0:06X})".format(file_size))
+      print("  File size: {0} (0x{0:06X})".format(ib_file.file_size))
       if args.hexdump:
         dump_header(infile)
       if args.print_analysis:
@@ -251,8 +264,8 @@ def main():
         if len(counts_list)>1:
           counts_list_sum = sum(counts_list)
           counts_list_str += " ( = {})".format(counts_list_sum)
-        print("  Header: {} <-> counted: {}".format(
-          ib_file.hdr_num_entries, counts_list_str
+        print("  Header: {:4d} <-> split: {:4d} counted: {}".format(
+          ib_file.hdr_num_entries, len(ib_file.b_entries), counts_list_str
         ))
         all_entry_sizes.append(ib_file.entry_size)
         all_entry_headings.append(ib_file.entry_heading)
@@ -266,8 +279,22 @@ def main():
         len(uniq_entry_headings), " ; ".join(uniq_entry_headings_str)
       ))
     #
-    for ib_file in ib_files:
-      parse_file_entries(ib_file)
+    print("")
+    len_ib_files = len(ib_files)
+    for ibf, ib_file in enumerate(ib_files):
+      n_ibf = ibf+1
+      path = os.path.normpath(ib_file.file.name)
+      file_name = os.sep.join( path.split(os.sep)[-2:] )
+      if args.print_log_entries:
+        eh = ib_file.entry_heading
+        print( "IBFILE: ({:3d}/{:3d}): {} ({:02X} {:02X} ; {} B)".format( n_ibf, len_ib_files, file_name, eh[0], eh[1], ib_file.file_size ) )
+      parse_file_entries(ib_file, do_log=args.print_log_entries)
+      if args.print_log_entries:
+        print("   Parsed entries: {:4d} (out of {:4d} header expected)".format(len(ib_file.entries), ib_file.hdr_num_entries))
+        print("")
+    if args.print_log_entries:
+      print( "IBFILE: DONE" )
+
   #process(args.infile, args.outfile)
 
 if __name__ == '__main__':
