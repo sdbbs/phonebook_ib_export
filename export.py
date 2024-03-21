@@ -332,6 +332,7 @@ def process(infile, outfile):
 
 
 def main():
+  global merged_ipb_entries
   parser = argparse.ArgumentParser( formatter_class=RawDescriptionHelpFormatter,
     description=HELP_TEXT)
   parser.add_argument('infiles', type=argparse.FileType('rb'),
@@ -346,65 +347,77 @@ def main():
             help='print log entries parsing results to stdout (can be lots of lines)')
   parser.add_argument('-j', '--outjson', type=argparse.FileType('w', encoding='utf8'),
             help='Output intermediate contacts collection to .json file')
+  parser.add_argument('-i', '--injson', type=argparse.FileType('r', encoding='utf8'),
+            help='Do not parse .ib infiles; instead read injson file, and use it to reconstruct intermediate contacts collection')
   args = parser.parse_args()
 
-  # perform analysis (parsing) regardless
-  for infile in args.infiles:
-    analyze_file(infile)
+  if (args.injson):
+    # we have --injson - reconstruct intermediate contacts collection: merged_ipb_entries
+    merged_ipb_entries_load = json.load(args.injson)
+    merged_ipb_entries = []
+    for tmipbe in merged_ipb_entries_load:
+      tipbe = IPBEntry(tmipbe["name"], tmipbe["phone"])
+      merged_ipb_entries.append(tipbe)
+  else:
+    # no --injson - parse .ib infiles
+    # perform analysis (parsing) regardless
+    for infile in args.infiles:
+      analyze_file(infile)
 
-  # output report regardless
-  len_ib_files = len(ib_files)
-  for ibf, ib_file in enumerate(ib_files):
-    n_ibf = ibf + 1
-    infile = ib_file.file
-    print(os.path.abspath(infile.name))
-    eh = ib_file.entry_heading
-    print("  File {0:3d}/{1:3d} filesize: {2:7d} (0x{2:06X}) ; entry sig {3:02X} {4:02X}".format(n_ibf, len_ib_files, ib_file.file_size, eh[0], eh[1]))
-    err_lines = [line for line in ib_file.entries_parse_log if line.startswith("-- cannot")]
-    len_err_lines = len(err_lines)
-    print("  Parsed entries: {:4d} (out of {:4d} header expected); parse errors {}".format(len(ib_file.entries), ib_file.hdr_num_entries, len_err_lines))
-    if args.hexdump:
-      dump_header(infile)
+    # output report regardless
+    len_ib_files = len(ib_files)
+    for ibf, ib_file in enumerate(ib_files):
+      n_ibf = ibf + 1
+      infile = ib_file.file
+      print(os.path.abspath(infile.name))
+      eh = ib_file.entry_heading
+      print("  File {0:3d}/{1:3d} filesize: {2:7d} (0x{2:06X}) ; entry sig {3:02X} {4:02X}".format(n_ibf, len_ib_files, ib_file.file_size, eh[0], eh[1]))
+      err_lines = [line for line in ib_file.entries_parse_log if line.startswith("-- cannot")]
+      len_err_lines = len(err_lines)
+      print("  Parsed entries: {:4d} (out of {:4d} header expected); parse errors {}".format(len(ib_file.entries), ib_file.hdr_num_entries, len_err_lines))
+      if args.hexdump:
+        dump_header(infile)
+      if args.print_analysis:
+        print("\n".join(ib_file.analysis_str))
+      if args.print_log_entries:
+        print("\n".join(ib_file.entries_parse_log))
+      else:
+        if len_err_lines>0:
+          print("\n".join(err_lines))
+      if (n_ibf != len_ib_files):
+        print("")
     if args.print_analysis:
-      print("\n".join(ib_file.analysis_str))
-    if args.print_log_entries:
-      print("\n".join(ib_file.entries_parse_log))
-    else:
-      if len_err_lines>0:
-        print("\n".join(err_lines))
-    if (n_ibf != len_ib_files):
+      # print a comparison between number of entries from header vs counted number of entries
+      # seemingly, if there are no differing rel_offsets, then header == counted+1
+      # (unless header == counted == 1); else header == sum(counted)
       print("")
-  if args.print_analysis:
-    # print a comparison between number of entries from header vs counted number of entries
-    # seemingly, if there are no differing rel_offsets, then header == counted+1
-    # (unless header == counted == 1); else header == sum(counted)
-    print("")
-    print("Number of entries comparison:")
-    all_entry_sizes = []
-    all_entry_headings = []
-    for ib_file in ib_files:
-      counts_list = tuple(ib_file.unique_rel_offsets.values())
-      counts_list_str = "+".join(map(str, counts_list))
-      if len(counts_list)>1:
-        counts_list_sum = sum(counts_list)
-        counts_list_str += " ( = {})".format(counts_list_sum)
-      print("  Header: {:4d} <-> split: {:4d} counted: {}".format(
-        ib_file.hdr_num_entries, len(ib_file.b_entries), counts_list_str
+      print("Number of entries comparison:")
+      all_entry_sizes = []
+      all_entry_headings = []
+      for ib_file in ib_files:
+        counts_list = tuple(ib_file.unique_rel_offsets.values())
+        counts_list_str = "+".join(map(str, counts_list))
+        if len(counts_list)>1:
+          counts_list_sum = sum(counts_list)
+          counts_list_str += " ( = {})".format(counts_list_sum)
+        print("  Header: {:4d} <-> split: {:4d} counted: {}".format(
+          ib_file.hdr_num_entries, len(ib_file.b_entries), counts_list_str
+        ))
+        all_entry_sizes.append(ib_file.entry_size)
+        all_entry_headings.append(ib_file.entry_heading)
+      uniq_entry_sizes = list(set(all_entry_sizes))
+      uniq_entry_headings = list(set(all_entry_headings))
+      uniq_entry_headings_str = ["0x{:02X} 0x{:02X}".format(eh[0], eh[1]) for eh in uniq_entry_headings]
+      print("Unique entry sizes ({}): {}".format(
+        len(uniq_entry_sizes), ", ".join(map(str, uniq_entry_sizes))
       ))
-      all_entry_sizes.append(ib_file.entry_size)
-      all_entry_headings.append(ib_file.entry_heading)
-    uniq_entry_sizes = list(set(all_entry_sizes))
-    uniq_entry_headings = list(set(all_entry_headings))
-    uniq_entry_headings_str = ["0x{:02X} 0x{:02X}".format(eh[0], eh[1]) for eh in uniq_entry_headings]
-    print("Unique entry sizes ({}): {}".format(
-      len(uniq_entry_sizes), ", ".join(map(str, uniq_entry_sizes))
-    ))
-    print("Unique entry headings ({}): {}".format(
-      len(uniq_entry_headings), " ; ".join(uniq_entry_headings_str)
-    ))
+      print("Unique entry headings ({}): {}".format(
+        len(uniq_entry_headings), " ; ".join(uniq_entry_headings_str)
+      ))
+    #
+    print("")
+    print("Files processed: {:3d}".format(len_ib_files))
   #
-  print("")
-  print("Files processed: {:3d}".format(len_ib_files))
   # clean up/remove items with empty name/phone fields
   ipbentries_with_empties = []
   for ipbe in merged_ipb_entries:
@@ -432,10 +445,16 @@ def main():
   uniq_phones = {}
   num_duplicate_phones = 0
   for ipbe in merged_ipb_entries:
-    if ipbe.phone not in uniq_phones.keys():
+    phone_found = "" #(ipbe.phone in uniq_phones.keys())
+    for tupkey in uniq_phones.keys():
+      #if ipbe.phone == tupkey: # strict equality, as for `ipbe.phone in uniq_phones.keys()`
+      if len(ipbe.phone)>6 and ipbe.phone in tupkey: # substring check
+        phone_found = tupkey
+        break
+    if not(phone_found):
       uniq_phones[ipbe.phone] = [ipbe]
     else:
-      uniq_phones[ipbe.phone] += [ipbe]
+      uniq_phones[phone_found] += [ipbe]
   if len(uniq_phones.keys()):
     print("")
     for tuphone in uniq_phones.keys():
