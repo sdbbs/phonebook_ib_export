@@ -264,11 +264,16 @@ def main():
     analyze_file(infile)
 
   if not(args.outfile):
-    for ib_file in ib_files:
+    len_ib_files = len(ib_files)
+    for ibf, ib_file in enumerate(ib_files):
+      n_ibf = ibf + 1
       infile = ib_file.file
       print(os.path.abspath(infile.name))
-      print("  File size: {0} (0x{0:06X})".format(ib_file.file_size))
-      print("  Parsed entries: {:4d} (out of {:4d} header expected)".format(len(ib_file.entries), ib_file.hdr_num_entries))
+      eh = ib_file.entry_heading
+      print("  File {0:3d}/{1:3d} filesize: {2:7d} (0x{2:06X}) ; entry sig {3:02X} {4:02X}".format(n_ibf, len_ib_files, ib_file.file_size, eh[0], eh[1]))
+      err_lines = [line for line in ib_file.entries_parse_log if line.startswith("-- cannot")]
+      len_err_lines = len(err_lines)
+      print("  Parsed entries: {:4d} (out of {:4d} header expected); parse errors {}".format(len(ib_file.entries), ib_file.hdr_num_entries, len_err_lines))
       if args.hexdump:
         dump_header(infile)
       if args.print_analysis:
@@ -276,14 +281,15 @@ def main():
       if args.print_log_entries:
         print("\n".join(ib_file.entries_parse_log))
       else:
-        err_lines = [line for line in ib_file.entries_parse_log if line.startswith("-- cannot")]
-        if len(err_lines)>0:
+        if len_err_lines>0:
           print("\n".join(err_lines))
-      print()
+      if (n_ibf != len_ib_files):
+        print("")
     if args.print_analysis:
       # print a comparison between number of entries from header vs counted number of entries
       # seemingly, if there are no differing rel_offsets, then header == counted+1
       # (unless header == counted == 1); else header == sum(counted)
+      print("")
       print("Number of entries comparison:")
       all_entry_sizes = []
       all_entry_headings = []
@@ -308,6 +314,8 @@ def main():
         len(uniq_entry_headings), " ; ".join(uniq_entry_headings_str)
       ))
     #
+    print("")
+    print("Files processed: {:3d}".format(len_ib_files))
   #process(args.infile, args.outfile)
 
 if __name__ == '__main__':
