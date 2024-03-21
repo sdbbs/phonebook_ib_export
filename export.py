@@ -103,14 +103,20 @@ class IbFileData(object):
 
 ib_files = [] # will be populated with IbFileData objects
 
-# https://stackoverflow.com/q/78068090
 from json import JSONEncoder
 def _default(self, obj):
   return getattr(obj.__class__, "to_json", _default.default)(obj)
 _default.default = JSONEncoder().default
 JSONEncoder.default = _default
-class OrderedObjectDict(object):
-  __dict__ = OrderedDict()
+class OrderedClassMembers(type): # https://stackoverflow.com/q/4459531
+  @classmethod
+  def __prepare__(self, name, bases):
+    return OrderedDict()
+  def __new__(self, name, bases, classdict):
+    classdict['__ordered__'] = [key for key in classdict.keys()
+      if key not in ('__module__', '__qualname__')]
+    return type.__new__(self, name, bases, classdict)
+class OrderedObjectDict(metaclass=OrderedClassMembers): #(object): # https://stackoverflow.com/q/78068090
   def __setattr__(self, name, value):
     self.__dict__[name] = value
   def __getattr__(self, name):
@@ -134,7 +140,12 @@ class IPBEntry(OrderedObjectDict):
     if phone is not None:
       self.phone = phone
     self.iduplicates = 0 # intended to track only identical duplicates
+  #def setdata(self, name, phone):
+  #  self.name = name
+  #  self.phone = phone
+  #  return self # so we can use it on same line with instantiator
   def has_same_content(self, in_ipb_entry):
+    #print("has_same_content name '{}' == '{}' {} ; '{}' == '{}' {}".format(self.name, in_ipb_entry.name, (self.name == in_ipb_entry.name), self.phone, in_ipb_entry.phone, (self.phone == in_ipb_entry.phone) ))
     if ( (self.name == in_ipb_entry.name) and (self.phone == in_ipb_entry.phone) ):
       return True
     else:
@@ -254,6 +265,7 @@ def analyze_file(infile):
   parse_file_entries(ibfile_data)
 
 def parse_file_entries(ib_file):
+  global merged_ipb_entries
   ibf = ib_file
   ibf.entries = []
   eplog = ibf.entries_parse_log = []
@@ -269,15 +281,19 @@ def parse_file_entries(ib_file):
       continue
     eplog.append("-- entry {}, {} bytes: name: '{}' phone: '{}'".format(n_ibe, len(b_entry_data), entry.name, entry.phone))
     ibf.entries.append(entry)
-    ipb_entry = IPBEntry(name=entry.name, phone=entry.phone)
+    #ipb_entry = IPBEntry().setdata(entry.name, entry.phone)
+    ipb_entry = IPBEntry(entry.name, entry.phone)
     identical_ipb_entry_found = False
+    #print(f"{merged_ipb_entries=}")
     for tpb_entry in merged_ipb_entries:
+      #print(f"  IL: {ipb_entry=} {tpb_entry=} {identical_ipb_entry_found=}")
       if tpb_entry.has_same_content(ipb_entry):
         identical_ipb_entry_found = True
         tpb_entry.iduplicates += 1
         break
     if not(identical_ipb_entry_found):
       merged_ipb_entries.append(ipb_entry)
+    #print(f"OL: {ipb_entry=} {identical_ipb_entry_found=} {len(merged_ipb_entries)=} {merged_ipb_entries=}")
 
 
 def process(infile, outfile):
@@ -371,8 +387,10 @@ def main():
     #
     print("")
     print("Files processed: {:3d}".format(len_ib_files))
-    print("Extracted entries: {:5d}".format(len(merged_ipb_entries)))
-    print(merged_ipb_entries)
+    all_duplicate_counts = [ipbe.iduplicates for ipbe in merged_ipb_entries]
+    #unique_duplicate_counts = list(dict.fromkeys(all_duplicate_counts)) # without counts
+    unique_duplicate_counts = dict(Counter(all_duplicate_counts).items())
+    print("Extracted entries: {:5d} (found duplicate counts: {})".format(len(merged_ipb_entries), unique_duplicate_counts))
   #process(args.infile, args.outfile)
 
 if __name__ == '__main__':
