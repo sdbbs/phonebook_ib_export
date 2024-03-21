@@ -97,6 +97,7 @@ class IbFileData(object):
     self.analysis_str = None
     self.b_entries = None
     self.entries = None
+    self.entries_parse_log = None
 
 ib_files = [] # will be populated with IbFileData objects
 
@@ -203,24 +204,25 @@ def analyze_file(infile):
   ibfile_data.analysis_str = analysis_str
   ibfile_data.b_entries = b_entries
   ibfile_data.entries = []
+  ibfile_data.entries_parse_log = []
   ib_files.append(ibfile_data)
+  parse_file_entries(ibfile_data)
 
-def parse_file_entries(ib_file, do_log=True):
+def parse_file_entries(ib_file):
   ibf = ib_file
   ibf.entries = []
+  eplog = ibf.entries_parse_log = []
   for ibe, b_entry_data in enumerate(ibf.b_entries):
     n_ibe = ibe + 1
     try:
       entry = Entry(b_entry_data)
     except Exception as e:
-      if (do_log):
-        hexstr = ""
-        if False: # make True for more debug
-          hexstr = "\n" + str(hexdump(b_entry_data))
-        print("-- cannot parse entry {} with {} bytes; ignoring ({}){}".format(n_ibe, len(b_entry_data), e, hexstr))
+      hexstr = ""
+      if False: # make True for more debug
+        hexstr = "\n" + str(hexdump(b_entry_data))
+      eplog.append("-- cannot parse entry {} with {} bytes; ignoring ({}){}".format(n_ibe, len(b_entry_data), e, hexstr))
       continue
-    if (do_log):
-      print("-- entry {}, {} bytes: name: '{}' phone: '{}'".format(n_ibe, len(b_entry_data), entry.name, entry.phone))
+    eplog.append("-- entry {}, {} bytes: name: '{}' phone: '{}'".format(n_ibe, len(b_entry_data), entry.name, entry.phone))
     ibf.entries.append(entry)
 
 
@@ -245,7 +247,7 @@ def process(infile, outfile):
 
 def main():
   parser = argparse.ArgumentParser(
-    description='Nokia 3310 phonebook.ib exporter. If no --outfile is specified, loop through the input files and print path and file size (can also use --hexdump,  --print-analysis and --print-log-entries in this case).')
+    description='Nokia 3310 phonebook.ib exporter. If no --outfile is specified, loop through the input files and print path, file size and number of parsed entries and entry parse errors (can also use --hexdump,  --print-analysis and --print-log-entries in this case).')
   parser.add_argument('infiles', type=argparse.FileType('rb'),
             help='Phonebook .ib files to read', nargs='+')
   parser.add_argument('-o', '--outfile', type=argparse.FileType('w', encoding='utf8'),
@@ -266,10 +268,17 @@ def main():
       infile = ib_file.file
       print(os.path.abspath(infile.name))
       print("  File size: {0} (0x{0:06X})".format(ib_file.file_size))
+      print("  Parsed entries: {:4d} (out of {:4d} header expected)".format(len(ib_file.entries), ib_file.hdr_num_entries))
       if args.hexdump:
         dump_header(infile)
       if args.print_analysis:
         print("\n".join(ib_file.analysis_str))
+      if args.print_log_entries:
+        print("\n".join(ib_file.entries_parse_log))
+      else:
+        err_lines = [line for line in ib_file.entries_parse_log if line.startswith("-- cannot")]
+        if len(err_lines)>0:
+          print("\n".join(err_lines))
       print()
     if args.print_analysis:
       # print a comparison between number of entries from header vs counted number of entries
@@ -299,22 +308,6 @@ def main():
         len(uniq_entry_headings), " ; ".join(uniq_entry_headings_str)
       ))
     #
-    print("")
-    len_ib_files = len(ib_files)
-    for ibf, ib_file in enumerate(ib_files):
-      n_ibf = ibf+1
-      path = os.path.normpath(ib_file.file.name)
-      file_name = os.sep.join( path.split(os.sep)[-2:] )
-      if args.print_log_entries:
-        eh = ib_file.entry_heading
-        print( "IBFILE: ({:3d}/{:3d}): {} ({:02X} {:02X} ; {:7d} B)".format( n_ibf, len_ib_files, file_name, eh[0], eh[1], ib_file.file_size ) )
-      parse_file_entries(ib_file, do_log=args.print_log_entries)
-      if args.print_log_entries:
-        print("   Parsed entries: {:4d} (out of {:4d} header expected)".format(len(ib_file.entries), ib_file.hdr_num_entries))
-        print("")
-    if args.print_log_entries:
-      print( "IBFILE: DONE" )
-
   #process(args.infile, args.outfile)
 
 if __name__ == '__main__':
