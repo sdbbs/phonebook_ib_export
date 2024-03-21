@@ -38,8 +38,8 @@ class Entry(object):
     if self.hdr == (0xBC, 0x00):
       self.name_len_offset = 0x4a
       self.name_start = 0x4c
-      self.phone_len_offset = 0x1c
-      self.phone_start = 0x1e
+      self.phone_len_offset = 0x1d
+      self.phone_start = 0x1f
 
     # Name length
     name_len = struct.unpack_from('B', data, self.name_len_offset)[0]
