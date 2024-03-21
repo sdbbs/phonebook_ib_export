@@ -65,6 +65,21 @@ class Entry(object):
     return '<Entry name={} phone={}>'.format(self.name, self.phone)
 
 
+class IbFileData(object):
+  def __init__(self):
+    self.file = None
+    self.header = None
+    self.hdr_num_entries = None
+    self.entry_heading = None
+    self.offsets = None
+    self.rel_offsets = None
+    self.unique_rel_offsets = None
+    self.entry_size = None
+    self.analysis_str = None
+
+ib_files = [] # will be populated with IbFileData objects
+
+
 class hexdump:
   # https://gist.github.com/NeatMonster/c06c61ba4114a2b31418a364341c26c0
   def __init__(self, buf, off=0):
@@ -93,15 +108,23 @@ class hexdump:
 
 
 def dump_header(infile):
-  header = infile.read(0x244) # 0x244 = 580 bytes header; changes file cursor position
+  infile.seek(0)
+  header = infile.read(0x244) # 0x244 = 580 bytes header; .read changes file cursor position
   header_str = hexdump(header)
   print(header_str)
   next_four = infile.read(4)
   next_four_hex_bstr = binascii.hexlify(next_four, ' ')
   next_four_hex_str = next_four_hex_bstr.decode('utf-8') # same as 'ascii' here
   print("nextfour: {}".format(next_four_hex_str))
+
+def analyze_file(infile):
+  infile.seek(0)
+  header = infile.read(0x244) # 0x244 = 580 bytes header; .read changes file cursor position
+  next_four = infile.read(4)
   entry_heading = next_four[:2]
   eh_len = len(entry_heading)
+  # two bytes at offset 0x30 (in header) should give number of entries as uint16_t LE
+  hdr_num_entries = struct.unpack_from("<H", header, 0x30)[0]
   # read entire file in RAM, then search for entry headings, record relative offsets
   offsets = []
   offset = 0
@@ -119,17 +142,33 @@ def dump_header(infile):
   rel_offsets = tuple((x - y) for (x, y) in zip(offsets[1:], offsets[:-1]))
   #unique_rel_offsets = list(dict.fromkeys(rel_offsets)) # without counts
   unique_rel_offsets = dict(Counter(rel_offsets).items())
+  # get key (rel offset size in bytes) where value (number of occurences) is max as assumed entry size
+  entry_size = max(unique_rel_offsets, key=unique_rel_offsets.get)
+  analysis_str = []
+  analysis_str.append( "Number of entries (from offset 0x30 in header): {}".format(hdr_num_entries) )
   uniq_reloffs_strl = ["at relative offset {}: {} times".format(offs, cnt) for offs, cnt in unique_rel_offsets.items()]
   uniq_reloffs_str = "; ".join(uniq_reloffs_strl)
   eh_report = "Assumed entry heading (hex) {:02X} {:02X} occurs: {}".format(
     entry_heading[0], entry_heading[1], uniq_reloffs_str
   )
-  print(eh_report)
-
+  analysis_str.append( eh_report )
+  analysis_str.append( "Chosen assumed entry size is: {0:} (0x{0:04X})".format(entry_size) )
+  #
+  ibfile_data = IbFileData()
+  ibfile_data.file = infile
+  ibfile_data.header = header
+  ibfile_data.hdr_num_entries = hdr_num_entries
+  ibfile_data.entry_heading = entry_heading
+  ibfile_data.offsets = offsets
+  ibfile_data.rel_offsets = rel_offsets
+  ibfile_data.unique_rel_offsets = unique_rel_offsets
+  ibfile_data.entry_size = entry_size
+  ibfile_data.analysis_str = analysis_str
+  ib_files.append(ibfile_data)
 
 
 def process(infile, outfile):
-  header = infile.read(0x244) # 0x244 = 580 bytes header; changes file cursor position
+  header = infile.read(0x244) # 0x244 = 580 bytes header; .read changes file cursor position
   entries = 0
   while True:
     data_hdr = infile.read(2)
@@ -149,45 +188,46 @@ def process(infile, outfile):
 
 def main():
   parser = argparse.ArgumentParser(
-    description='Nokia 3310 phonebook.ib exporter. If no --outfile is specified, loop through the input files and dump first two bytes of header')
+    description='Nokia 3310 phonebook.ib exporter. If no --outfile is specified, loop through the input files and print path and file size (can also use --hexdump and --print-analysis in this case).')
   parser.add_argument('infiles', type=argparse.FileType('rb'),
             help='Phonebook ,ib files to read', nargs='+')
   parser.add_argument('-o', '--outfile', type=argparse.FileType('w', encoding='utf8'),
             help='VCF File to write')
+  parser.add_argument('-x', '--hexdump', action='store_true',
+            help='print hexdump of the header to stdout')
+  parser.add_argument('-a', '--print-analysis', action='store_true',
+            help='print analysis results to stdout')
   args = parser.parse_args()
+  # perform analysis regardless
+  for infile in args.infiles:
+    analyze_file(infile)
+
   if not(args.outfile):
-    for infile in args.infiles:
+    for ib_file in ib_files:
+      infile = ib_file.file
       print(os.path.abspath(infile.name))
       file_size = os.fstat(infile.fileno()).st_size
       print("  File size: {0} (0x{0:06X})".format(file_size))
-      dump_header(infile)
+      if args.hexdump:
+        dump_header(infile)
+      if args.print_analysis:
+        print("\n".join(ib_file.analysis_str))
       print()
+    if args.print_analysis:
+      # print a comparison between number of entries from header vs counted number of entries
+      # seemingly, if there are no differing rel_offsets, then header == counted+1
+      # (unless header == counted == 1); else header == sum(counted)
+      print("Number of entries comparison:")
+      for ib_file in ib_files:
+        counts_list = tuple(ib_file.unique_rel_offsets.values())
+        counts_list_str = "+".join(map(str, counts_list))
+        if len(counts_list)>1:
+          counts_list_sum = sum(counts_list)
+          counts_list_str += " ( = {})".format(counts_list_sum)
+        print("  Header: {} <-> counted: {}".format(
+          ib_file.hdr_num_entries, counts_list_str
+        ))
   #process(args.infile, args.outfile)
 
 if __name__ == '__main__':
   main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
