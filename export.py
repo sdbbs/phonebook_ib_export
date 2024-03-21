@@ -17,6 +17,7 @@ import sys, os
 import argparse
 import struct
 import binascii
+from collections import Counter
 
 class Entry(object):
   def __init__(self, data):
@@ -92,10 +93,40 @@ class hexdump:
 
 
 def dump_header(infile):
-  print(os.path.abspath(infile.name))
   header = infile.read(0x244) # 0x244 = 580 bytes header; changes file cursor position
   header_str = hexdump(header)
   print(header_str)
+  next_four = infile.read(4)
+  next_four_hex_bstr = binascii.hexlify(next_four, ' ')
+  next_four_hex_str = next_four_hex_bstr.decode('utf-8') # same as 'ascii' here
+  print("nextfour: {}".format(next_four_hex_str))
+  entry_heading = next_four[:2]
+  eh_len = len(entry_heading)
+  # read entire file in RAM, then search for entry headings, record relative offsets
+  offsets = []
+  offset = 0
+  infile.seek(offset)
+  file_bstr = infile.read()
+  searching = True
+  while searching:
+    offset = file_bstr.find(entry_heading, offset)
+    if offset < 0:
+      searching = False
+    else:
+      offsets.append(offset)
+      offset += eh_len
+  #print(offsets)
+  rel_offsets = tuple((x - y) for (x, y) in zip(offsets[1:], offsets[:-1]))
+  #unique_rel_offsets = list(dict.fromkeys(rel_offsets)) # without counts
+  unique_rel_offsets = dict(Counter(rel_offsets).items())
+  uniq_reloffs_strl = ["at relative offset {}: {} times".format(offs, cnt) for offs, cnt in unique_rel_offsets.items()]
+  uniq_reloffs_str = "; ".join(uniq_reloffs_strl)
+  eh_report = "Assumed entry heading (hex) {:02X} {:02X} occurs: {}".format(
+    entry_heading[0], entry_heading[1], uniq_reloffs_str
+  )
+  print(eh_report)
+
+
 
 def process(infile, outfile):
   header = infile.read(0x244) # 0x244 = 580 bytes header; changes file cursor position
@@ -126,7 +157,11 @@ def main():
   args = parser.parse_args()
   if not(args.outfile):
     for infile in args.infiles:
+      print(os.path.abspath(infile.name))
+      file_size = os.fstat(infile.fileno()).st_size
+      print("  File size: {0} (0x{0:06X})".format(file_size))
       dump_header(infile)
+      print()
   #process(args.infile, args.outfile)
 
 if __name__ == '__main__':
