@@ -19,17 +19,33 @@ import struct
 import binascii
 from collections import Counter
 
+phone_entry_headings_questionmark = {
+  "Nokia 3310 3G": bytes([0x98, 0x03]), # also [0x94, 0x03]?
+  "Nokia 220 4G": bytes([0xBC, 0x00]),
+}
+
 class Entry(object):
   def __init__(self, data):
     self.hdr = struct.unpack_from('BB', data, 0x0)
     #if self.hdr != (0x94, 0x03):
     #  raise ValueError('Invalid entry')
 
+    # inital assumption: entry heading self.hdr is (0x98, 0x03)
+    self.name_len_offset = 0x16c
+    self.name_start = 0x16e
+    self.phone_len_offset = 0x12a
+    self.phone_start = 0x12c
+    if self.hdr == (0xBC, 0x00):
+      self.name_len_offset = 0x4a
+      self.name_start = 0x4c
+      self.phone_len_offset = 0x1c
+      self.phone_start = 0x1e
+
     # Name length
-    name_len = struct.unpack_from('B', data, 0x16c)[0]
+    name_len = struct.unpack_from('B', data, self.name_len_offset)[0]
 
     # Name
-    start = 0x16e
+    start = self.name_start
     end = start + (name_len * 2)
     self.name = data[start:end].decode('utf-16')
     self.phone = self.__decode_phone(data)
@@ -47,11 +63,12 @@ class Entry(object):
     raise ValueError('Unknown digit value {}'.format(value))
 
   def __decode_phone(self, data):
-    phone_len, extra = struct.unpack_from('bb', data, 0x12a)
+    phone_len, extra = struct.unpack_from('bb', data, self.phone_len_offset)
+    phone_start = self.phone_start
     phone = ''
     if extra & 0x10:
       phone += '+'
-    for byte in data[0x12c:0x12c+phone_len]:
+    for byte in data[phone_start:phone_start+phone_len]:
       phone += self.__decode_digit(byte & 0x0f)
       phone += self.__decode_digit(byte >> 4)
     return phone
@@ -197,7 +214,10 @@ def parse_file_entries(ib_file, do_log=True):
       entry = Entry(b_entry_data)
     except Exception as e:
       if (do_log):
-        print("-- cannot parse entry {} with {} bytes; ignoring".format(n_ibe, len(b_entry_data)))
+        hexstr = ""
+        if False: # make True for more debug
+          hexstr = "\n" + str(hexdump(b_entry_data))
+        print("-- cannot parse entry {} with {} bytes; ignoring ({}){}".format(n_ibe, len(b_entry_data), e, hexstr))
       continue
     if (do_log):
       print("-- entry {}, {} bytes: name: '{}' phone: '{}'".format(n_ibe, len(b_entry_data), entry.name, entry.phone))
@@ -287,7 +307,7 @@ def main():
       file_name = os.sep.join( path.split(os.sep)[-2:] )
       if args.print_log_entries:
         eh = ib_file.entry_heading
-        print( "IBFILE: ({:3d}/{:3d}): {} ({:02X} {:02X} ; {} B)".format( n_ibf, len_ib_files, file_name, eh[0], eh[1], ib_file.file_size ) )
+        print( "IBFILE: ({:3d}/{:3d}): {} ({:02X} {:02X} ; {:7d} B)".format( n_ibf, len_ib_files, file_name, eh[0], eh[1], ib_file.file_size ) )
       parse_file_entries(ib_file, do_log=args.print_log_entries)
       if args.print_log_entries:
         print("   Parsed entries: {:4d} (out of {:4d} header expected)".format(len(ib_file.entries), ib_file.hdr_num_entries))
