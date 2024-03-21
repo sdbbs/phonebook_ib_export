@@ -44,24 +44,33 @@ class Entry(object):
     #  raise ValueError('Invalid entry')
 
     # inital assumption: entry heading self.hdr is (0x98, 0x03)
+    # unsure what exactly is extra1 field, but it will end up in name
     self.name_len_offset = 0x16c
     self.name_start = 0x16e
     self.phone_len_offset = 0x12a
     self.phone_start = 0x12c
+    self.extra1_len_offset = 0x1c0
+    self.extra1_start = 0x1c2
     if self.hdr == (0xBC, 0x00):
       self.name_len_offset = 0x4a
       self.name_start = 0x4c
       self.phone_len_offset = 0x1d
       self.phone_start = 0x1f
+      self.extra1_len_offset = 0x8a
+      self.extra1_start = 0x8c
 
     # Name length
     name_len = struct.unpack_from('B', data, self.name_len_offset)[0]
+    extra1_len = struct.unpack_from('B', data, self.extra1_len_offset)[0]
 
     # Name
     start = self.name_start
     end = start + (name_len * 2)
     self.name = data[start:end].decode('utf-16')
     self.phone = self.__decode_phone(data)
+    extra1_start = self.extra1_start
+    extra1_end = extra1_start + (extra1_len * 2)
+    self.extra1 = data[extra1_start:extra1_end].decode('utf-16')
 
   @staticmethod
   def __decode_digit(value):
@@ -298,7 +307,10 @@ def parse_file_entries(ib_file):
     eplog.append("-- entry {}, {} bytes: name: '{}' phone: '{}'".format(n_ibe, len(b_entry_data), entry.name, entry.phone))
     ibf.entries.append(entry)
     #ipb_entry = IPBEntry().setdata(entry.name, entry.phone)
-    ipb_entry = IPBEntry(entry.name, entry.phone, entry)
+    fullname = entry.name
+    if (entry.extra1):
+      fullname += " " + entry.extra1
+    ipb_entry = IPBEntry(fullname, entry.phone, entry)
     identical_ipb_entry_found = False
     #print(f"{merged_ipb_entries=}")
     for tpb_entry in merged_ipb_entries:
@@ -353,6 +365,9 @@ def main():
 
   if (args.injson):
     # we have --injson - reconstruct intermediate contacts collection: merged_ipb_entries
+    print("")
+    print("Received --injson: skipping parse of .ib infiles, and instead reconstructing intermediate contacts collection from:")
+    print("  {}".format( os.path.abspath(args.injson.name) ))
     merged_ipb_entries_load = json.load(args.injson)
     merged_ipb_entries = []
     for tmipbe in merged_ipb_entries_load:
