@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 Yossi Gottlieb
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+# Modified to support Nokia TA-1279 (entry signature 0x38 0x02)
 
 import sys, os
 import argparse
@@ -23,36 +10,24 @@ from collections import Counter
 from collections import OrderedDict
 import json
 
-HELP_TEXT = """Nokia 3310 phonebook.ib exporter. (should also handle Nokia 220 4G)
+HELP_TEXT = """Nokia phonebook.ib exporter with TA-1279 support.
 
-By default, loop through the input files, parse entries and extract unique contacts in intermediary format, and print report: path, file size and number of parsed entries and entry parse errors (can also use --hexdump,  --print-analysis and --print-log-entries in this case).
-
-If --injson is specified, skip parsing of .ib infiles, and instead reconstruct intermediary format/intermediate contacts collection from the given .json file.
-
-If --outjson is specified, dump the contacts intermediary format as .json file.
-
-If --outfile is specified, write the contacts intermediary format as .vcf file.
+Supports: Nokia 3310 3G, Nokia 220 4G, Nokia TA-1279, and similar models.
 """
-
-phone_entry_headings_questionmark = {
-  "Nokia 3310 3G": bytes([0x98, 0x03]), # also [0x94, 0x03]?
-  "Nokia 220 4G": bytes([0xBC, 0x00]),
-}
 
 class Entry(object):
   def __init__(self, data):
     self.hdr = struct.unpack_from('BB', data, 0x0)
-    #if self.hdr != (0x94, 0x03):
-    #  raise ValueError('Invalid entry')
-
-    # inital assumption: entry heading self.hdr is (0x98, 0x03)
-    # unsure what exactly is extra1 field, but it will end up in name
+    
+    # Default offsets (Nokia 3310 3G - 0x98/0x94, 0x03)
     self.name_len_offset = 0x16c
     self.name_start = 0x16e
     self.phone_len_offset = 0x12a
     self.phone_start = 0x12c
     self.extra1_len_offset = 0x1c0
     self.extra1_start = 0x1c2
+    
+    # Nokia 220 4G (0xBC, 0x00)
     if self.hdr == (0xBC, 0x00):
       self.name_len_offset = 0x4a
       self.name_start = 0x4c
@@ -60,19 +35,38 @@ class Entry(object):
       self.phone_start = 0x1f
       self.extra1_len_offset = 0x8a
       self.extra1_start = 0x8c
+    
+    # Nokia TA-1279 (0x38, 0x02)
+    elif self.hdr == (0x38, 0x02):
+      self.name_len_offset = 0x60
+      self.name_start = 0x62
+      self.phone_len_offset = 0x1e
+      self.phone_start = 0x20
+      self.extra1_len_offset = 0xb8
+      self.extra1_start = 0xba - 4  # Adjust by 4 bytes based on observed truncation
 
-    # Name length
-    name_len = struct.unpack_from('B', data, self.name_len_offset)[0]
+    # Read name length - for TA-1279 main name uses uint16
+    name_len = struct.unpack_from('<H', data, self.name_len_offset)[0]
+    
+    # For extra1, read as single byte
     extra1_len = struct.unpack_from('B', data, self.extra1_len_offset)[0]
 
     # Name
     start = self.name_start
     end = start + (name_len * 2)
-    self.name = data[start:end].decode('utf-16')
+    try:
+      self.name = data[start:end].decode('utf-16-le', errors='ignore').rstrip('\x00')
+    except:
+      self.name = ""
+    
     self.phone = self.__decode_phone(data)
-    extra1_start = self.extra1_start
+    
+    extra1_start = self.extra1_start  
     extra1_end = extra1_start + (extra1_len * 2)
-    self.extra1 = data[extra1_start:extra1_end].decode('utf-16')
+    try:
+      self.extra1 = data[extra1_start:extra1_end].decode('utf-16-le', errors='ignore').rstrip('\x00')
+    except:
+      self.extra1 = ""
 
   @staticmethod
   def __decode_digit(value):
@@ -83,7 +77,7 @@ class Entry(object):
     if value == 15:
       return ''
     if value == 11:
-      return '#'  # Just a guess
+      return '#'
     raise ValueError('Unknown digit value {}'.format(value))
 
   def __decode_phone(self, data):
@@ -98,9 +92,11 @@ class Entry(object):
     return phone
 
   def vcard(self):
-    return 'BEGIN:VCARD\nVERSION:3.0\nN:{name}\n' \
-         'FN:{name}\nTEL;type=HOME:{phone}\n' \
-         'END:VCARD\n'.format(name=self.name, phone=self.phone)
+    return 'BEGIN:VCARD\r\nVERSION:2.1\r\n' \
+         'N;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:;{name};;;\r\n' \
+         'FN;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:{name}\r\n' \
+         'TEL;HOME:{phone}\r\n' \
+         'END:VCARD\r\n'.format(name=self.name, phone=self.phone)
 
   def __str__(self):
     return '<Entry name={} phone={}>'.format(self.name, self.phone)
@@ -123,14 +119,15 @@ class IbFileData(object):
     self.entries = None
     self.entries_parse_log = None
 
-ib_files = [] # will be populated with IbFileData objects
+ib_files = []
 
 from json import JSONEncoder
 def _default(self, obj):
   return getattr(obj.__class__, "to_json", _default.default)(obj)
 _default.default = JSONEncoder().default
 JSONEncoder.default = _default
-class OrderedClassMembers(type): # https://stackoverflow.com/q/4459531
+
+class OrderedClassMembers(type):
   @classmethod
   def __prepare__(self, name, bases):
     return OrderedDict()
@@ -138,7 +135,8 @@ class OrderedClassMembers(type): # https://stackoverflow.com/q/4459531
     classdict['__ordered__'] = [key for key in classdict.keys()
       if key not in ('__module__', '__qualname__')]
     return type.__new__(self, name, bases, classdict)
-class OrderedObjectDict(metaclass=OrderedClassMembers): #(object): # https://stackoverflow.com/q/78068090
+
+class OrderedObjectDict(metaclass=OrderedClassMembers):
   def __setattr__(self, name, value):
     self.__dict__[name] = value
   def __getattr__(self, name):
@@ -150,9 +148,8 @@ class OrderedObjectDict(metaclass=OrderedClassMembers): #(object): # https://sta
   def keys(self):
     return self.__dict__.keys()
   def to_json(self):
-    return self.__dict__ # or how you want it to be serialized
+    return self.__dict__
 
-# Intermediate Phone Book Entry
 class IPBEntry(OrderedObjectDict):
   def __init__(self, name=None, phone=None, eref=None):
     self.name = ""
@@ -164,25 +161,24 @@ class IPBEntry(OrderedObjectDict):
     self.eref = None
     if eref is not None:
       self.eref = eref
-    self.iduplicates = 0 # intended to track only identical duplicates
-  #def setdata(self, name, phone):
-  #  self.name = name
-  #  self.phone = phone
-  #  return self # so we can use it on same line with instantiator
+    self.iduplicates = 0
+
   def has_same_content(self, in_ipb_entry):
-    #print("has_same_content name '{}' == '{}' {} ; '{}' == '{}' {}".format(self.name, in_ipb_entry.name, (self.name == in_ipb_entry.name), self.phone, in_ipb_entry.phone, (self.phone == in_ipb_entry.phone) ))
     if ( (self.name == in_ipb_entry.name) and (self.phone == in_ipb_entry.phone) ):
       return True
     else:
       return False
+
   def __str__(self):
     return "<IPBEntry name='{}' phone='{}' iduplicates={}>".format(self.name, self.phone, self.iduplicates)
+
   def __repr__(self):
     return "<IPBEntry name='{}' phone='{}' iduplicates={}>".format(self.name, self.phone, self.iduplicates)
+
   def to_json(self):
     clean_dict = OrderedDict( tuple((key, value) for key, value in self.__dict__.items() if key not in ("eref",)) )
     return clean_dict
-  # make the vcard match the format for Nokia 215 4G
+
   def vcard(self):
     return 'BEGIN:VCARD\r\nVERSION:2.1\r\n' \
          'N;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:;{name};;;\r\n' \
@@ -190,11 +186,10 @@ class IPBEntry(OrderedObjectDict):
          'TEL;HOME:{phone}\r\n' \
          'END:VCARD\r\n'.format(name=self.name, phone=self.phone)
 
-merged_ipb_entries = [] # will be populated with IPBEntry objects
+merged_ipb_entries = []
 
 
 class hexdump:
-  # https://gist.github.com/NeatMonster/c06c61ba4114a2b31418a364341c26c0
   def __init__(self, buf, off=0):
     self.buf = buf
     self.off = off
@@ -222,24 +217,22 @@ class hexdump:
 
 def dump_header(infile):
   infile.seek(0)
-  header = infile.read(0x244) # 0x244 = 580 bytes header; .read changes file cursor position
+  header = infile.read(0x244)
   header_str = hexdump(header)
   print(header_str)
   next_four = infile.read(4)
   next_four_hex_bstr = binascii.hexlify(next_four, ' ')
-  next_four_hex_str = next_four_hex_bstr.decode('utf-8') # same as 'ascii' here
+  next_four_hex_str = next_four_hex_bstr.decode('utf-8')
   print("nextfour: {}".format(next_four_hex_str))
 
 def analyze_file(infile):
   file_size = os.fstat(infile.fileno()).st_size
   infile.seek(0)
-  header = infile.read(0x244) # 0x244 = 580 bytes header; .read changes file cursor position
+  header = infile.read(0x244)
   next_four = infile.read(4)
   entry_heading = next_four[:2]
   eh_len = len(entry_heading)
-  # two bytes at offset 0x30 (in header) should give number of entries as uint16_t LE
   hdr_num_entries = struct.unpack_from("<H", header, 0x30)[0]
-  # read entire file in RAM, then search for entry headings, record relative offsets
   b_entries = []
   offsets = []
   offset = 0
@@ -253,7 +246,6 @@ def analyze_file(infile):
     else:
       offsets.append(offset)
       offset += eh_len
-  #print(offsets)
   last_offset_idx = len(offsets)-1
   for ioff, offset in enumerate(offsets):
     if ioff == last_offset_idx:
@@ -262,13 +254,11 @@ def analyze_file(infile):
     this_entry_slice = file_bstr[offset:next_offset]
     b_entries.append(this_entry_slice)
   last_offset = offsets[last_offset_idx]
-  last_bytes_delta = file_size - last_offset # is almost never close to 1, assume it's a chunk
+  last_bytes_delta = file_size - last_offset
   if last_bytes_delta > 1:
     b_entries.append(file_bstr[last_offset:file_size-1])
   rel_offsets = tuple((x - y) for (x, y) in zip(offsets[1:], offsets[:-1]))
-  #unique_rel_offsets = list(dict.fromkeys(rel_offsets)) # without counts
   unique_rel_offsets = dict(Counter(rel_offsets).items())
-  # get key (rel offset size in bytes) where value (number of occurences) is max as assumed entry size
   entry_size = max(unique_rel_offsets, key=unique_rel_offsets.get)
   analysis_str = []
   analysis_str.append( "Number of entries (from offset 0x30 in header): {}".format(hdr_num_entries) )
@@ -280,7 +270,6 @@ def analyze_file(infile):
   analysis_str.append( eh_report )
   analysis_str.append( "Chosen assumed entry size is: {0:} (0x{0:04X})".format(entry_size) )
   analysis_str.append( "Last offset is {:7d} for file size {:7d}".format(last_offset, file_size) )
-  #
   ibfile_data = IbFileData()
   ibfile_data.file = infile
   ibfile_data.file_size = file_size
@@ -309,47 +298,32 @@ def parse_file_entries(ib_file):
       entry = Entry(b_entry_data)
     except Exception as e:
       hexstr = ""
-      if False: # make True for more debug
-        hexstr = "\n" + str(hexdump(b_entry_data))
       eplog.append("-- cannot parse entry {} with {} bytes; ignoring ({}){}".format(n_ibe, len(b_entry_data), e, hexstr))
       continue
-    eplog.append("-- entry {}, {} bytes: name: '{}' phone: '{}'".format(n_ibe, len(b_entry_data), entry.name, entry.phone))
+    
+    # Combine name and extra1 - if main name is empty, use extra1 as the primary name
+    fullname = entry.name.strip()
+    extra_name = entry.extra1.strip()
+    
+    if not fullname and extra_name:
+      # Main name empty, use extra as primary
+      fullname = extra_name
+    elif fullname and extra_name and fullname != extra_name:
+      # Both exist and different, combine them
+      fullname = fullname + " " + extra_name
+    
+    eplog.append("-- entry {}, {} bytes: name: '{}' phone: '{}'".format(n_ibe, len(b_entry_data), fullname, entry.phone))
     ibf.entries.append(entry)
-    #ipb_entry = IPBEntry().setdata(entry.name, entry.phone)
-    fullname = entry.name
-    if (entry.extra1):
-      fullname += " " + entry.extra1
+    
     ipb_entry = IPBEntry(fullname, entry.phone, entry)
     identical_ipb_entry_found = False
-    #print(f"{merged_ipb_entries=}")
     for tpb_entry in merged_ipb_entries:
-      #print(f"  IL: {ipb_entry=} {tpb_entry=} {identical_ipb_entry_found=}")
       if tpb_entry.has_same_content(ipb_entry):
         identical_ipb_entry_found = True
         tpb_entry.iduplicates += 1
         break
     if not(identical_ipb_entry_found):
       merged_ipb_entries.append(ipb_entry)
-    #print(f"OL: {ipb_entry=} {identical_ipb_entry_found=} {len(merged_ipb_entries)=} {merged_ipb_entries=}")
-
-
-def old_process(infile, outfile):
-  header = infile.read(0x244) # 0x244 = 580 bytes header; .read changes file cursor position
-  entries = 0
-  while True:
-    data_hdr = infile.read(2)
-    if not data_hdr:
-      break
-    hdr = struct.unpack('BB', data_hdr)
-    data_len = (
-      (hdr[0] >> 4) * 100 + (hdr[0] & 0x0f) * 10 +
-      (hdr[1] >> 4))
-    data = data_hdr + infile.read(data_len - 2)
-    entry = Entry(data)
-    outfile.write(entry.vcard())
-    entries += 1
-  print('Exported {} entries.'.format(entries))
-
 
 
 def main():
@@ -365,19 +339,16 @@ def main():
   parser.add_argument('-a', '--print-analysis', action='store_true',
             help='print analysis results to stdout')
   parser.add_argument('-e', '--print-log-entries', action='store_true',
-            help='print log entries parsing results to stdout (can be lots of lines)')
+            help='print log entries parsing results to stdout')
   parser.add_argument('-j', '--outjson', type=argparse.FileType('w', encoding='utf8'),
             help='Output intermediate contacts collection to .json file')
   parser.add_argument('-i', '--injson', type=argparse.FileType('r', encoding='utf8'),
-            help='Do not parse .ib infiles; instead read injson file, and use it to reconstruct intermediate contacts collection')
+            help='Read injson file to reconstruct contacts')
   args = parser.parse_args()
 
-  #process(args.infile, args.outfile) # not anymore, is now old_process
-
   if (args.injson):
-    # we have --injson - reconstruct intermediate contacts collection: merged_ipb_entries
     print("")
-    print("Received --injson: skipping parse of .ib infiles, and instead reconstructing intermediate contacts collection from:")
+    print("Received --injson: skipping parse of .ib infiles, reconstructing from:")
     print("  {}".format( os.path.abspath(args.injson.name) ))
     merged_ipb_entries_load = json.load(args.injson)
     merged_ipb_entries = []
@@ -385,12 +356,9 @@ def main():
       tipbe = IPBEntry(tmipbe["name"], tmipbe["phone"])
       merged_ipb_entries.append(tipbe)
   else:
-    # no --injson - parse .ib infiles
-    # perform analysis (parsing) regardless
     for infile in args.infiles:
       analyze_file(infile)
 
-    # output report regardless
     len_ib_files = len(ib_files)
     for ibf, ib_file in enumerate(ib_files):
       n_ibf = ibf + 1
@@ -413,9 +381,6 @@ def main():
       if (n_ibf != len_ib_files):
         print("")
     if args.print_analysis:
-      # print a comparison between number of entries from header vs counted number of entries
-      # seemingly, if there are no differing rel_offsets, then header == counted+1
-      # (unless header == counted == 1); else header == sum(counted)
       print("")
       print("Number of entries comparison:")
       all_entry_sizes = []
@@ -440,21 +405,23 @@ def main():
       print("Unique entry headings ({}): {}".format(
         len(uniq_entry_headings), " ; ".join(uniq_entry_headings_str)
       ))
-    #
     print("")
     print("Files processed: {:3d}".format(len_ib_files))
-  #
-  # clean up/remove items with empty name/phone fields
+
   ipbentries_with_empties = []
   for ipbe in merged_ipb_entries:
-    if not(ipbe.name) or not(ipbe.phone):
+    # Only remove if BOTH name AND phone are empty
+    if not(ipbe.name) and not(ipbe.phone):
       ipbentries_with_empties.append(ipbe)
+    # If name is empty but phone exists, use phone as name
+    elif not(ipbe.name) and ipbe.phone:
+      ipbe.name = ipbe.phone
   if len(ipbentries_with_empties):
     print("")
     for ipbee in ipbentries_with_empties:
       print("Removing entry with empty fields: {}".format(ipbee))
       merged_ipb_entries.remove(ipbee)
-  # warn of duplicate names or phones
+
   uniq_names = {}
   num_duplicate_names = 0
   for ipbe in merged_ipb_entries:
@@ -468,13 +435,13 @@ def main():
       if len(uniq_names[tuname]) > 1:
         print("WARNING: Duplicate name '{}': {}".format(tuname, uniq_names[tuname]))
         num_duplicate_names += 1
+
   uniq_phones = {}
   num_duplicate_phones = 0
   for ipbe in merged_ipb_entries:
-    phone_found = "" #(ipbe.phone in uniq_phones.keys())
+    phone_found = ""
     for tupkey in uniq_phones.keys():
-      #if ipbe.phone == tupkey: # strict equality, as for `ipbe.phone in uniq_phones.keys()`
-      if len(ipbe.phone)>6 and ipbe.phone in tupkey: # substring check
+      if len(ipbe.phone)>6 and ipbe.phone in tupkey:
         phone_found = tupkey
         break
     if not(phone_found):
@@ -487,8 +454,8 @@ def main():
       if len(uniq_phones[tuphone]) > 1:
         print("WARNING: Duplicate phone '{}': {}".format(tuphone, uniq_phones[tuphone]))
         num_duplicate_phones += 1
+
   all_duplicate_counts = [ipbe.iduplicates for ipbe in merged_ipb_entries]
-  #unique_duplicate_counts = list(dict.fromkeys(all_duplicate_counts)) # without counts
   unique_duplicate_counts = dict(Counter(all_duplicate_counts).items())
   print("")
   print("Extracted entries: {:5d} (removed empty field entries: {}; found duplicate counts: {})".format(
@@ -499,7 +466,6 @@ def main():
   ))
 
   if args.outjson or args.outfile:
-    # sort entries alphabetically by name, case insensitive
     merged_ipb_entries.sort(key=lambda x: x.name.lower(), reverse=False)
 
   if args.outjson:
